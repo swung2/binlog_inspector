@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	SQL "github.com/dropbox/godropbox/database/sqlbuilder"
+	sqltypes "github.com/dropbox/godropbox/database/sqltypes"
 	"github.com/siddontang/go-mysql/mysql"
 	"github.com/siddontang/go-mysql/replication"
 	sliceKits "github.com/toolkits/slice"
@@ -239,6 +240,7 @@ func GenInsertSqlsForOneRowsEvent(rEv *replication.RowsEvent, colDefs []SQL.NonA
 	rowCnt := len(rEv.Rows)
 	schema := string(rEv.Table.Schema)
 	table := string(rEv.Table.Table)
+	columnCount := len(colDefs)
 	var sqlArr []string
 	var sqlType string
 	if ifRollback {
@@ -252,11 +254,11 @@ func GenInsertSqlsForOneRowsEvent(rEv *replication.RowsEvent, colDefs []SQL.NonA
 	var i int
 	var endIndex int
 	for i = 0; i < rowCnt; i += rowsPerSql {
-		insertSql = SQL.NewTable(table, colDefs...).Insert(colDefs...)
+		insertSql = SQL.NewTable(table, colDefs[:columnCount-2]...).Insert(colDefs[:columnCount-2]...)
 		endIndex = GetMinValue(rowCnt, i+rowsPerSql)
-		oneSql, err = GenInsertSqlForRows(rEv.Rows[i:endIndex], insertSql, schema, ifprefixDb)
+		oneSql, err = GenInsertSqlForRows(rEv.Rows[i:endIndex][:columnCount-2], insertSql, schema, ifprefixDb)
 		if err != nil {
-			PrintGenSqlError(err, rEv.Rows[i:endIndex], sqlType, schema, table)
+			PrintGenSqlError(err, rEv.Rows[i:endIndex][:columnCount-2], sqlType, schema, table)
 			continue
 		} else {
 			sqlArr = append(sqlArr, oneSql)
@@ -266,9 +268,9 @@ func GenInsertSqlsForOneRowsEvent(rEv *replication.RowsEvent, colDefs []SQL.NonA
 
 	if endIndex < rowCnt {
 		insertSql = SQL.NewTable(table, colDefs...).Insert(colDefs...)
-		oneSql, err = GenInsertSqlForRows(rEv.Rows[endIndex:rowCnt], insertSql, schema, ifprefixDb)
+		oneSql, err = GenInsertSqlForRows(rEv.Rows[endIndex:rowCnt][:columnCount-2], insertSql, schema, ifprefixDb)
 		if err != nil {
-			PrintGenSqlError(err, rEv.Rows[endIndex:rowCnt], sqlType, schema, table)
+			PrintGenSqlError(err, rEv.Rows[endIndex:rowCnt][:columnCount-2], sqlType, schema, table)
 		} else {
 			sqlArr = append(sqlArr, oneSql)
 		}
@@ -288,6 +290,7 @@ func GenDeleteSqlsForOneRowsEvent(rEv *replication.RowsEvent, colDefs []SQL.NonA
 	//var sqlArr []string
 	schema := string(rEv.Table.Schema)
 	table := string(rEv.Table.Table)
+	columnCount := len(colDefs)
 	schemaInSql := schema
 	if !ifprefixDb {
 		schemaInSql = ""
@@ -300,11 +303,11 @@ func GenDeleteSqlsForOneRowsEvent(rEv *replication.RowsEvent, colDefs []SQL.NonA
 		sqlType = "delete"
 	}
 	for i, row := range rEv.Rows {
-		whereCond := GenEqualConditions(row, colDefs, uniKey, ifMinImage)
+		whereCond := GenEqualConditions(row[:columnCount-2], colDefs, uniKey, ifMinImage)
 
 		sql, err := SQL.NewTable(table, colDefs...).Delete().Where(SQL.And(whereCond...)).String(schemaInSql)
 		if err != nil {
-			PrintGenSqlError(err, [][]interface{}{row}, sqlType, schema, table)
+			PrintGenSqlError(err, [][]interface{}{row[:columnCount-2]}, sqlType, schema, table)
 			continue
 		}
 		sqlArr[i] = sql
@@ -370,6 +373,7 @@ func GenUpdateSqlsForOneRowsEvent(colsTypeNameFromMysql []string, colsTypeName [
 	schema := string(rEv.Table.Schema)
 	table := string(rEv.Table.Table)
 	schemaInSql := schema
+	columnCount := len(colDefs)
 	if !ifprefixDb {
 		schemaInSql = ""
 	}
@@ -386,17 +390,66 @@ func GenUpdateSqlsForOneRowsEvent(colsTypeNameFromMysql []string, colsTypeName [
 		sqlType = "update"
 	}
 	for i := 0; i < rowCnt; i += 2 {
-		upSql := SQL.NewTable(table, colDefs...).Update()
-		if ifRollback {
-			upSql = GenUpdateSetPart(colsTypeNameFromMysql, colsTypeName, upSql, colDefs, rEv.Rows[i], rEv.Rows[i+1], ifMinImage)
-			wherePart = GenEqualConditions(rEv.Rows[i+1], colDefs, uniKey, ifMinImage)
-		} else {
-			upSql = GenUpdateSetPart(colsTypeNameFromMysql, colsTypeName, upSql, colDefs, rEv.Rows[i+1], rEv.Rows[i], ifMinImage)
-			wherePart = GenEqualConditions(rEv.Rows[i], colDefs, uniKey, ifMinImage)
+		delete_val_before := 0
+		delete_val_after := 0
+		fmt.Printf("%v\n", colDefs[columnCount-1].Name())
+		if colDefs[columnCount-1].Name() == "__deleted" {
+			var delete_val_b sqltypes.Value
+			var delete_val_a sqltypes.Value
+			delete_val_b, err = sqltypes.BuildValue(rEv.Rows[i][columnCount-1])
+			if err != nil {
+				fmt.Printf("\t sqltypes.BuildValue failed %v\n", err)
+				continue
+			}
+			err = sqltypes.ConvertAssign(delete_val_b, &delete_val_before)
+			if err != nil {
+				fmt.Printf("\tconvert %v to uint64 failed %v\n", rEv.Rows[i][columnCount-1], err)
+				continue
+			}
+			delete_val_a, err = sqltypes.BuildValue(rEv.Rows[i+1][columnCount-1])
+			if err != nil {
+				fmt.Printf("\t sqltypes.BuildValue failed %v\n", err)
+				continue
+			}
+			err = sqltypes.ConvertAssign(delete_val_a, &delete_val_after)
+			if err != nil {
+				fmt.Printf("\tconvert %v to uint64 failed %v\n", rEv.Rows[i+1][columnCount-1], err)
+				continue
+			}
 		}
+		fmt.Printf("%v<->%v\n", delete_val_before, delete_val_after)
+		if delete_val_before == 0 && delete_val_after == 1 {
+			insertSql := SQL.NewTable(table, colDefs[:columnCount-2]...).Insert(colDefs[:columnCount-2]...)
+			var oneSql string
+			oneSql, err = GenInsertSqlForRows([][]interface{}{rEv.Rows[i][:columnCount-2]}, insertSql, schema, ifprefixDb)
+			if err != nil {
+				PrintGenSqlError(err, [][]interface{}{rEv.Rows[i][:columnCount-2]}, sqlType, schema, table)
+				continue
+			}
+			sql = oneSql
 
-		upSql.Where(SQL.And(wherePart...))
-		sql, err = upSql.String(schemaInSql)
+		} else if delete_val_before == 1 && delete_val_after == 0 {
+			whereCond := GenEqualConditions(rEv.Rows[i][:columnCount-2], colDefs[:columnCount-2], uniKey, ifMinImage)
+
+			sql, err = SQL.NewTable(table, colDefs[:columnCount-2]...).Delete().Where(SQL.And(whereCond...)).String(schemaInSql)
+			if err != nil {
+				PrintGenSqlError(err, [][]interface{}{rEv.Rows[i][:columnCount-2]}, sqlType, schema, table)
+				continue
+			}
+
+		} else {
+			upSql := SQL.NewTable(table, colDefs...).Update()
+			if ifRollback {
+				upSql = GenUpdateSetPart(colsTypeNameFromMysql, colsTypeName, upSql, colDefs, rEv.Rows[i][:columnCount-2], rEv.Rows[i+1], ifMinImage)
+				wherePart = GenEqualConditions(rEv.Rows[i+1][:columnCount-2], colDefs, uniKey, ifMinImage)
+			} else {
+				upSql = GenUpdateSetPart(colsTypeNameFromMysql, colsTypeName, upSql, colDefs, rEv.Rows[i+1][:columnCount-2], rEv.Rows[i], ifMinImage)
+				wherePart = GenEqualConditions(rEv.Rows[i][:columnCount-2], colDefs, uniKey, ifMinImage)
+			}
+
+			upSql.Where(SQL.And(wherePart...))
+			sql, err = upSql.String(schemaInSql)
+		}
 		if err != nil {
 			PrintGenSqlError(err, [][]interface{}{}, sqlType, schema, table)
 			fmt.Printf("\toriginally, row data before updated: %v\n\t row data after updated: %v\n", rEv.Rows[i], rEv.Rows[i+1])
